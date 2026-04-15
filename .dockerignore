@@ -1,0 +1,23 @@
+.git
+.gitignore
+.cursor
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+
+# Model and cache artifacts
+*.pt
+*.pth
+*.safetensors
+.cache/
+
+# Local outputs
+cuboids*.json
+*.log

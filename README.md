@@ -1,82 +1,134 @@
-# Label to Cuboid
+# Label to Cuboid Service
 
-Convert a 2D image + text label into 3D oriented bounding boxes (cuboids) using SAM 3 + Depth Pro + geometric lifting.
+Dockerized FastAPI inference service that converts image(s) + prompt into 3D cuboid JSON using:
+
+- SAM 3 (prompted segmentation)
+- Depth Pro (metric depth + focal length)
+- Geometric lifting (mask + depth -> OBB cuboid)
 
 ```
-Image + "chair"  →  SAM 3 (masks)  →  Depth Pro (metric depth)  →  3D Cuboids (JSON)
+images + "chair" -> SAM 3 -> Depth Pro -> geometric lifting -> cuboid JSON
 ```
 
-## How It Works
+## What This Service Exposes
 
-1. **SAM 3** segments all instances of the text label in the image (e.g. all "chairs")
-2. **Depth Pro** estimates metric depth (meters) and camera focal length from the raw image — no camera metadata needed
-3. **Geometric lifting** back-projects masked depth pixels to 3D and fits an oriented bounding box (OBB) per object
+- `POST /infer` accepts one or more images in a single request
+- `GET /health` reports service readiness and configured batch size
+- Structured JSON logs suitable for Docker log collectors
 
-## Requirements
+## API
 
-- Linux 64-bit with NVIDIA GPU (16 GB+ VRAM recommended)
-- Python 3.12+
-- CUDA 12.6+
+### `POST /infer`
 
-## Quick Start
+Multipart form fields:
+
+- `images`: list of image files (`jpg`, `jpeg`, `png`)
+- `prompt`: text query (for example `chair`)
+- `confidence_threshold`: optional float in `[0, 1]`
+
+Example:
 
 ```bash
-# 1. Create environment
-conda create -n cuboid-pipeline python=3.12 -y
-conda activate cuboid-pipeline
-
-# 2. Install PyTorch
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-
-# 3. Install SAM 3
-git clone https://github.com/facebookresearch/sam3.git
-cd sam3 && pip install -e . && cd ..
-huggingface-cli login  # SAM 3 weights require access approval
-
-# 4. Install Depth Pro (HuggingFace version, NVIDIA-optimized)
-pip install "transformers>=4.48" accelerate
-
-# 5. Install extras
-pip install scipy
-
-# 6. Run
-python label_to_cuboid.py --image photo.jpg --label "chair"
+curl -X POST "http://localhost:8000/infer" \
+  -F "prompt=chair" \
+  -F "confidence_threshold=0.3" \
+  -F "images=@/data/photo1.jpg" \
+  -F "images=@/data/photo2.jpg"
 ```
 
-## Output
+Response:
 
 ```json
 {
-    "label": "chair",
-    "confidence": 0.87,
-    "center": [1.23, 0.45, 3.67],
-    "dimensions": [0.55, 0.82, 0.50],
-    "rotation_quaternion": [0.996, 0.001, -0.015, 0.085],
-    "corners_3d": [[0.95, 0.04, 3.42], "...8 corners"]
+  "prompt": "chair",
+  "total_cuboids": 4,
+  "results": [
+    {
+      "image_index": 0,
+      "filename": "photo1.jpg",
+      "count": 3,
+      "cuboids": [
+        {
+          "object_index": 0,
+          "label": "chair",
+          "confidence": 0.87,
+          "center": [1.23, 0.45, 3.67],
+          "dimensions": [0.55, 0.82, 0.50],
+          "rotation_matrix": [[0.98, -0.17, 0.01], [0.17, 0.98, 0.03], [-0.02, -0.03, 1.00]],
+          "rotation_quaternion": [0.996, 0.001, -0.015, 0.085],
+          "corners_3d": [[0.95, 0.04, 3.42], "..."]
+        }
+      ],
+      "error": null
+    }
+  ]
 }
 ```
 
-Coordinate system: camera frame (X-right, Y-down, Z-forward), units in meters.
+If one image fails, that image result contains an `error` string and the rest of the batch still returns.
 
-## Performance
+### `GET /health`
 
-| Stage | Time | Notes |
-|-------|------|-------|
-| SAM 3 | ~1-2 sec | Finds all instances |
-| Depth Pro | ~0.3 sec | With float16 on NVIDIA |
-| Geometric lifting | ~10 ms | Per object, CPU only |
-| **Total** | **~1.5-2.5 sec** | Per image |
+```json
+{
+  "status": "ok",
+  "models_loaded": true,
+  "gpu_batch_size": 2
+}
+```
 
-## Documentation
+## Batch Behavior
 
-See [PLAN_SAM3_DEPTH_CUBOID.md](PLAN_SAM3_DEPTH_CUBOID.md) for the complete implementation plan including:
-- Full pipeline code (copy-paste ready)
-- Geometric lifting math (back-projection, PCA-based OBB)
-- Linux + NVIDIA GPU setup guide (step by step)
-- Docker deployment
-- Low-VRAM mode (8-12 GB GPUs)
-- Troubleshooting
-- UniDepth V2 as a fallback depth model
+The endpoint accepts any number of images up to `MAX_IMAGES_PER_REQUEST`. Internally:
+
+1. Inputs are chunked by `GPU_BATCH_SIZE`
+2. Each chunk runs model inference
+3. Results are merged and returned as a list
+
+Tune `GPU_BATCH_SIZE` by GPU memory:
+
+- `1` for low VRAM and safest behavior
+- `2` as a common default for 16 GB GPUs
+- `4+` for larger GPUs
+
+## Configuration
+
+Environment variables:
+
+- `LOG_LEVEL` (default: `INFO`)
+- `CONFIDENCE_THRESHOLD` (default: `0.3`)
+- `GPU_BATCH_SIZE` (default: `1`)
+- `MAX_IMAGES_PER_REQUEST` (default: `32`)
+- `DEVICE` (default: `cuda`)
+- `MODEL_DTYPE` (default: `float16`)
+- `HOST` (default: `0.0.0.0`)
+- `PORT` (default: `8000`)
+
+## Run With Docker Compose
+
+```bash
+docker compose up --build
+```
+
+Service runs on `http://localhost:8000`.
+
+## Run Locally (Without Docker)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+## Implementation Details
+
+- Geometric lifting utilities are in `app/geometric_lifting.py`
+- Endpoints and lifecycle are in `app/main.py`
+- Model orchestration and batch flow are in `app/pipeline.py`
+- Full research/algorithm document: `PLAN_SAM3_DEPTH_CUBOID.md`
 
 ## License
 

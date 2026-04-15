@@ -1,0 +1,20 @@
+services:
+  cuboid-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: label-to-cuboid:latest
+    container_name: label-to-cuboid
+    ports:
+      - "8000:8000"
+    environment:
+      LOG_LEVEL: INFO
+      CONFIDENCE_THRESHOLD: 0.3
+      GPU_BATCH_SIZE: 2
+      MAX_IMAGES_PER_REQUEST: 32
+      DEVICE: cuda
+      MODEL_DTYPE: float16
+      HOST: 0.0.0.0
+      PORT: 8000
+    gpus: all
+    restart: unless-stopped

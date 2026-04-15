@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+pydantic-settings
+python-json-logger
+
+numpy
+scipy
+Pillow
+
+torch
+torchvision
+transformers>=4.48
+accelerate
+
+sam3 @ git+https://github.com/facebookresearch/sam3.git
