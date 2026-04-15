@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Model weights and checkpoints
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.bin
+checkpoints/
+
+# HuggingFace cache
+.cache/
+
+# Output files
+*.ply
+*.glb
+*.obj
+cuboids*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cloned repos (installed as editable packages)
+sam3/
+ml-depth-pro/
