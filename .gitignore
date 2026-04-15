@@ -43,3 +43,10 @@ Thumbs.db
 sam3/
 ml-depth-pro/
 sam3-main.zip
+
+# test datasets
+gaosu-2/
+smoke_outputs/
+
+# local models
+models/

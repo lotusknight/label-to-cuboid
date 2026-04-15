@@ -3,6 +3,7 @@ FROM nvidia/cuda:12.6.3-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    HF_ENDPOINT=https://hf-mirror.com \
     PATH="/opt/conda/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y \
@@ -25,7 +26,7 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 
 RUN pip install --upgrade pip && \
-    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 && \
+    pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124 && \
     pip install "sam3 @ https://codeload.github.com/facebookresearch/sam3/zip/refs/heads/main" && \
     pip install -r requirements.txt
 

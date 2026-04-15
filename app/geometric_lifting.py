@@ -24,6 +24,10 @@ def backproject_depth_to_3d(
     depth_map: np.ndarray, mask: np.ndarray, intrinsics: np.ndarray
 ) -> np.ndarray:
     """Convert masked depth pixels into a 3D point cloud in camera coordinates."""
+    if mask.ndim > 2:
+        mask = mask.squeeze()
+    if mask.ndim > 2:
+        mask = mask[0]
     v, u = np.where(mask)
     if len(v) == 0:
         return np.empty((0, 3), dtype=np.float64)
@@ -57,8 +61,16 @@ def filter_outliers(points_3d: np.ndarray, std_multiplier: float = 2.0) -> np.nd
     return points_3d[keep]
 
 
-def fit_oriented_bounding_box(points_3d: np.ndarray) -> dict[str, np.ndarray]:
-    """Fit an oriented bounding box to a 3D point cloud using PCA."""
+def fit_oriented_bounding_box(
+    points_3d: np.ndarray, min_dim_ratio: float = 0.3
+) -> dict[str, np.ndarray]:
+    """Fit an oriented bounding box to a 3D point cloud using PCA.
+
+    Because a single-view backprojection yields a surface (not a volume),
+    the smallest PCA dimension is often near-zero.  ``min_dim_ratio``
+    inflates any collapsed axis to at least that fraction of the largest
+    axis so the cuboid has realistic depth.
+    """
     centroid = np.mean(points_3d, axis=0)
     centered = points_3d - centroid
 
@@ -75,6 +87,12 @@ def fit_oriented_bounding_box(points_3d: np.ndarray) -> dict[str, np.ndarray]:
     min_vals = projected.min(axis=0)
     max_vals = projected.max(axis=0)
     dimensions = max_vals - min_vals
+
+    max_dim = dimensions.max()
+    if max_dim > 0:
+        min_allowed = max_dim * min_dim_ratio
+        dimensions = np.maximum(dimensions, min_allowed)
+
     local_center = (min_vals + max_vals) / 2.0
     center = centroid + eigenvectors @ local_center
 

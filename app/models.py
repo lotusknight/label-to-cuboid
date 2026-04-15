@@ -8,6 +8,7 @@ class ImageResult(BaseModel):
     filename: str
     count: int = 0
     cuboids: list[dict[str, Any]] = Field(default_factory=list)
+    focal_length_px: float | None = None
     error: str | None = None
 
 

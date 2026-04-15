@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     max_images_per_request: int = Field(default=32, ge=1)
 
     sam3_model_id: str = "facebook/sam3"
+    sam3_checkpoint_path: str = ""
     depth_model_id: str = "apple/DepthPro-hf"
+    depth_local_path: str = ""
     device: str = "cuda"
     model_dtype: str = "float16"
 

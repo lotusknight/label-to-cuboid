@@ -12,9 +12,14 @@ services:
       CONFIDENCE_THRESHOLD: 0.3
       GPU_BATCH_SIZE: 2
       MAX_IMAGES_PER_REQUEST: 32
+      HF_ENDPOINT: https://hf-mirror.com
+      HF_TOKEN: ${HF_TOKEN:-}
+      SAM3_CHECKPOINT_PATH: /models/sam3.pt
       DEVICE: cuda
       MODEL_DTYPE: float16
       HOST: 0.0.0.0
       PORT: 8000
+    volumes:
+      - ./models:/models:ro
     gpus: all
     restart: unless-stopped

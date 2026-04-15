@@ -4,7 +4,10 @@ import io
 import logging
 import time
 from dataclasses import dataclass
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
+
+if TYPE_CHECKING:
+    import torch
 
 import numpy as np
 from PIL import Image
@@ -41,27 +44,63 @@ class SamBackend:
 
 
 class Sam3OfficialBackend(SamBackend):
-    def __init__(self) -> None:
+    def __init__(self, checkpoint_path: str = "", device: str = "cuda") -> None:
+        import torch as _torch
         from sam3.model_builder import build_sam3_image_model
         from sam3.model.sam3_image_processor import Sam3Processor
 
-        model = build_sam3_image_model()
-        self.processor = Sam3Processor(model)
+        self._torch = _torch
+        self._device = device
+        kwargs: dict[str, object] = {"device": device}
+        if checkpoint_path:
+            kwargs["checkpoint_path"] = checkpoint_path
+            kwargs["load_from_HF"] = False
+        model = build_sam3_image_model(**kwargs)
+        self.processor = Sam3Processor(model, confidence_threshold=0.0)
+
+    @staticmethod
+    def _mask_nms(
+        detections: list[dict[str, "np.ndarray | float"]], iou_threshold: float = 0.5
+    ) -> list[dict[str, "np.ndarray | float"]]:
+        """Greedy mask-IoU NMS: keep highest-score mask, remove overlapping ones."""
+        if len(detections) <= 1:
+            return detections
+        dets = sorted(detections, key=lambda d: d["score"], reverse=True)
+        keep: list[dict[str, np.ndarray | float]] = []
+        masks = [d["mask"] for d in dets]
+        areas = [float(m.sum()) for m in masks]
+        suppressed = [False] * len(dets)
+        for i in range(len(dets)):
+            if suppressed[i]:
+                continue
+            keep.append(dets[i])
+            for j in range(i + 1, len(dets)):
+                if suppressed[j]:
+                    continue
+                inter = float((masks[i] & masks[j]).sum())
+                union = areas[i] + areas[j] - inter
+                if union > 0 and inter / union > iou_threshold:
+                    suppressed[j] = True
+        return keep
 
     def segment(
         self, images: list[Image.Image], prompt: str, threshold: float
     ) -> list[list[dict[str, np.ndarray | float]]]:
+        self.processor.confidence_threshold = threshold
         results: list[list[dict[str, np.ndarray | float]]] = []
         for image in images:
-            image_np = np.array(image.convert("RGB"))
-            state = self.processor.set_image(image_np)
-            output = self.processor.set_text_prompt(state=state, prompt=prompt)
+            pil_rgb = image.convert("RGB")
+            with self._torch.autocast(device_type="cuda", dtype=self._torch.bfloat16):
+                state = self.processor.set_image(pil_rgb)
+                output = self.processor.set_text_prompt(state=state, prompt=prompt)
             detections: list[dict[str, np.ndarray | float]] = []
             for mask, score in zip(output.get("masks", []), output.get("scores", [])):
                 conf = float(score)
                 if conf < threshold:
                     continue
-                detections.append({"mask": np.array(mask, dtype=bool), "score": conf})
+                mask_np = mask.cpu().numpy() if hasattr(mask, "cpu") else np.asarray(mask)
+                detections.append({"mask": mask_np.astype(bool), "score": conf})
+            detections = self._mask_nms(detections, iou_threshold=0.3)
             results.append(detections)
         return results
 
@@ -117,14 +156,17 @@ class Sam3TransformersBackend(SamBackend):
 
 
 class DepthBackend:
-    def __init__(self, model_id: str, device: str, torch_dtype: "torch.dtype") -> None:
+    def __init__(
+        self, model_id: str, device: str, torch_dtype: "torch.dtype", local_path: str = ""
+    ) -> None:
         import torch
-        from transformers import DepthProForDepthEstimation, DepthProImageProcessorFast
+        from transformers import DepthProForDepthEstimation, DepthProImageProcessor
 
+        source = local_path if local_path else model_id
         self.torch = torch
-        self.processor = DepthProImageProcessorFast.from_pretrained(model_id)
+        self.processor = DepthProImageProcessor.from_pretrained(source)
         self.model = DepthProForDepthEstimation.from_pretrained(
-            model_id, torch_dtype=torch_dtype, attn_implementation="sdpa"
+            source, torch_dtype=torch_dtype, attn_implementation="sdpa"
         ).to(device)
         self.device = device
         self.torch_dtype = torch_dtype
@@ -136,19 +178,21 @@ class DepthBackend:
         with self.torch.no_grad():
             outputs = self.model(**inputs)
 
-        depths = outputs.predicted_depth.detach().cpu().float().numpy()
-        focals_raw = outputs.predicted_focal_length.detach().cpu().float().numpy()
+        target_sizes = [(img.height, img.width) for img in images]
+        post = self.processor.post_process_depth_estimation(
+            outputs, target_sizes=target_sizes
+        )
 
         depth_maps: list[np.ndarray] = []
         focal_lengths: list[float] = []
-        for i, image in enumerate(images):
-            depth = depths[i]
-            if depth.shape != (image.height, image.width):
-                h_scale = image.height / depth.shape[0]
-                w_scale = image.width / depth.shape[1]
-                depth = zoom(depth, (h_scale, w_scale), order=1)
+        for i, item in enumerate(post):
+            depth = item["predicted_depth"].cpu().float().numpy()
             depth_maps.append(depth)
-            focal_lengths.append(float(np.atleast_1d(focals_raw[i])[0]))
+            focal = item.get("focal_length")
+            if focal is not None:
+                focal_lengths.append(float(focal.cpu()))
+            else:
+                focal_lengths.append(float(max(images[i].width, images[i].height)))
 
         return depth_maps, focal_lengths
 
@@ -174,26 +218,17 @@ class CuboidPipeline:
         logger.info("loading_models", extra={"device": self.settings.device})
         started = time.perf_counter()
 
-        # Prefer the Transformers backend for batched SAM3. If unavailable, fallback.
-        try:
-            self.sam_backend = Sam3TransformersBackend(
-                model_id=self.settings.sam3_model_id,
-                device=self.settings.device,
-                torch_dtype=torch_dtype,
-            )
-            logger.info("sam3_backend_initialized", extra={"backend": "transformers"})
-        except Exception as exc:
-            logger.warning(
-                "sam3_transformers_unavailable_fallback_to_official",
-                extra={"error": str(exc)},
-            )
-            self.sam_backend = Sam3OfficialBackend()
-            logger.info("sam3_backend_initialized", extra={"backend": "official"})
+        self.sam_backend = Sam3OfficialBackend(
+            checkpoint_path=self.settings.sam3_checkpoint_path,
+            device=self.settings.device,
+        )
+        logger.info("sam3_backend_initialized", extra={"backend": "official"})
 
         self.depth_backend = DepthBackend(
             model_id=self.settings.depth_model_id,
             device=self.settings.device,
             torch_dtype=torch_dtype,
+            local_path=self.settings.depth_local_path,
         )
         elapsed = time.perf_counter() - started
         logger.info("models_loaded", extra={"seconds": round(elapsed, 3)})
@@ -266,6 +301,7 @@ class CuboidPipeline:
                             "filename": entry.filename,
                             "cuboids": cuboids,
                             "count": len(cuboids),
+                            "focal_length_px": focal_lengths[local_idx],
                             "error": None,
                         }
                     )
@@ -274,7 +310,7 @@ class CuboidPipeline:
                         "image_inference_failed",
                         extra={
                             "image_index": image_offset + local_idx,
-                            "filename": entry.filename,
+                            "image_filename": entry.filename,
                         },
                     )
                     all_results.append(
@@ -283,6 +319,7 @@ class CuboidPipeline:
                             "filename": entry.filename,
                             "cuboids": [],
                             "count": 0,
+                            "focal_length_px": focal_lengths[local_idx],
                             "error": str(exc),
                         }
                     )
@@ -305,15 +342,35 @@ class CuboidPipeline:
 
         for object_index, det in enumerate(detections):
             mask = np.asarray(det["mask"], dtype=bool)
+            if mask.ndim > 2:
+                mask = mask.squeeze()
+            if mask.ndim > 2:
+                mask = mask[0]
+
+            mask_for_vis = mask
+            if mask.shape != (height, width):
+                mask_for_vis = np.array(
+                    Image.fromarray(mask.astype(np.uint8) * 255).resize(
+                        (width, height), Image.NEAREST
+                    ),
+                    dtype=bool,
+                )
+
+            ys_2d, xs_2d = np.where(mask_for_vis)
+            if len(ys_2d) == 0:
+                continue
+            bbox_2d = [int(xs_2d.min()), int(ys_2d.min()), int(xs_2d.max()), int(ys_2d.max())]
+
+            mask_for_depth = mask
             if mask.shape != depth_map.shape:
-                mask = np.array(
+                mask_for_depth = np.array(
                     Image.fromarray(mask.astype(np.uint8) * 255).resize(
                         (depth_map.shape[1], depth_map.shape[0]), Image.NEAREST
                     ),
                     dtype=bool,
                 )
 
-            points_3d = backproject_depth_to_3d(depth_map, mask, intrinsics)
+            points_3d = backproject_depth_to_3d(depth_map, mask_for_depth, intrinsics)
             if len(points_3d) < 10:
                 continue
             points_3d = filter_outliers(points_3d, std_multiplier=2.0)
@@ -333,6 +390,8 @@ class CuboidPipeline:
                         obb["rotation_matrix"]
                     ).tolist(),
                     "corners_3d": obb["corners_3d"].tolist(),
+                    "bbox_2d": bbox_2d,
+                    "mask_area_px": int(mask_for_vis.sum()),
                 }
             )
         return cuboids
