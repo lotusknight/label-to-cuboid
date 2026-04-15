@@ -62,28 +62,35 @@ def filter_outliers(points_3d: np.ndarray, std_multiplier: float = 2.0) -> np.nd
 
 
 def fit_oriented_bounding_box(
-    points_3d: np.ndarray, min_dim_ratio: float = 0.3
+    points_3d: np.ndarray,
+    min_dim_ratio: float = 0.3,
+    gravity_aligned: bool = True,
 ) -> dict[str, np.ndarray]:
-    """Fit an oriented bounding box to a 3D point cloud using PCA.
+    """Fit an oriented bounding box to a 3D point cloud.
 
-    Because a single-view backprojection yields a surface (not a volume),
-    the smallest PCA dimension is often near-zero.  ``min_dim_ratio``
-    inflates any collapsed axis to at least that fraction of the largest
-    axis so the cuboid has realistic depth.
+    When ``gravity_aligned`` is True the cuboid's Y axis is locked to the
+    camera-Y direction (vertical in the image) so that top/bottom edges
+    stay horizontal.  The heading (yaw) in the XZ ground plane is still
+    estimated from the point distribution via PCA.
+
+    ``min_dim_ratio`` inflates any collapsed axis to at least that fraction
+    of the largest axis so the cuboid has realistic depth.
     """
     centroid = np.mean(points_3d, axis=0)
     centered = points_3d - centroid
 
-    cov = np.cov(centered, rowvar=False)
-    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+    if gravity_aligned:
+        axes = _gravity_aligned_axes(centered)
+    else:
+        cov = np.cov(centered, rowvar=False)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        order = eigenvalues.argsort()[::-1]
+        axes = eigenvectors[:, order]
 
-    order = eigenvalues.argsort()[::-1]
-    eigenvectors = eigenvectors[:, order]
+    if np.linalg.det(axes) < 0.0:
+        axes[:, -1] *= -1.0
 
-    if np.linalg.det(eigenvectors) < 0.0:
-        eigenvectors[:, -1] *= -1.0
-
-    projected = centered @ eigenvectors
+    projected = centered @ axes
     min_vals = projected.min(axis=0)
     max_vals = projected.max(axis=0)
     dimensions = max_vals - min_vals
@@ -94,7 +101,7 @@ def fit_oriented_bounding_box(
         dimensions = np.maximum(dimensions, min_allowed)
 
     local_center = (min_vals + max_vals) / 2.0
-    center = centroid + eigenvectors @ local_center
+    center = centroid + axes @ local_center
 
     half = dimensions / 2.0
     signs = np.array(
@@ -111,14 +118,51 @@ def fit_oriented_bounding_box(
         dtype=np.float64,
     )
     local_corners = signs * half
-    corners = (eigenvectors @ local_corners.T).T + center
+    corners = (axes @ local_corners.T).T + center
 
     return {
         "center": center,
         "dimensions": dimensions,
-        "rotation_matrix": eigenvectors,
+        "rotation_matrix": axes,
         "corners_3d": corners,
     }
+
+
+def _gravity_aligned_axes(centered: np.ndarray) -> np.ndarray:
+    """Build a rotation matrix with Y locked to camera-vertical.
+
+    Camera convention: X = right, Y = down, Z = forward.
+    The cuboid's local axes are:
+      col 0 – "width"  : heading direction in the XZ ground plane (PCA)
+      col 1 – "height" : camera Y  (gravity / vertical)
+      col 2 – "depth"  : orthogonal, completes the right-hand frame
+    """
+    y_axis = np.array([0.0, 1.0, 0.0])
+
+    xz = centered[:, [0, 2]]
+    if xz.shape[0] < 2:
+        forward = np.array([0.0, 0.0, 1.0])
+    else:
+        cov2d = np.cov(xz, rowvar=False)
+        eigvals, eigvecs = np.linalg.eigh(cov2d)
+        principal = eigvecs[:, eigvals.argsort()[-1]]
+        forward = np.array([principal[0], 0.0, principal[1]])
+        norm = np.linalg.norm(forward)
+        if norm < 1e-8:
+            forward = np.array([0.0, 0.0, 1.0])
+        else:
+            forward /= norm
+
+    side = np.cross(y_axis, forward)
+    norm = np.linalg.norm(side)
+    if norm < 1e-8:
+        side = np.array([1.0, 0.0, 0.0])
+    else:
+        side /= norm
+    forward = np.cross(side, y_axis)
+
+    axes = np.column_stack([side, y_axis, forward])
+    return axes
 
 
 def rotation_matrix_to_quaternion(rotation_matrix: np.ndarray) -> np.ndarray:

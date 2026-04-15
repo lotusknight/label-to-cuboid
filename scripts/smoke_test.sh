@@ -149,23 +149,25 @@ for item in results:
             conf = cuboid.get("confidence", 0.0)
             color = LABEL_COLORS.get(label, (200, 200, 200))
 
-            bbox = cuboid.get("bbox_2d")
-            if isinstance(bbox, list) and len(bbox) == 4:
-                x0, y0, x1, y1 = bbox
-                draw_over.rectangle([x0, y0, x1, y1], fill=color + (40,))
-                draw_main.rectangle([x0, y0, x1, y1], outline=color, width=2)
-                draw_main.text((x0 + 2, y0 - 14), f"{label}:{conf:.2f}", fill=(255, 255, 255))
-
             corners = cuboid.get("corners_3d")
-            if isinstance(corners, list) and len(corners) == 8:
-                pts = [project_corner(c, width, height, focal=item_fx) for c in corners]
-                if not any(p is None for p in pts):
-                    for a, b in front_edges:
-                        draw_main.line((pts[a], pts[b]), fill=color, width=3)
-                    for a, b in back_edges:
-                        draw_main.line((pts[a], pts[b]), fill=color, width=2)
-                    for a, b in depth_edges:
-                        draw_main.line((pts[a], pts[b]), fill=color, width=2)
+            if not isinstance(corners, list) or len(corners) != 8:
+                continue
+            pts = [project_corner(c, width, height, focal=item_fx) for c in corners]
+            if any(p is None for p in pts):
+                continue
+
+            face = [pts[0], pts[2], pts[6], pts[4]]
+            draw_over.polygon(face, fill=color + (40,))
+
+            for a, b in front_edges:
+                draw_main.line((pts[a], pts[b]), fill=color, width=3)
+            for a, b in back_edges:
+                draw_main.line((pts[a], pts[b]), fill=color, width=2)
+            for a, b in depth_edges:
+                draw_main.line((pts[a], pts[b]), fill=color, width=2)
+
+            tx, ty = pts[4]
+            draw_main.text((tx + 2, ty - 14), f"{label}:{conf:.2f}", fill=(255, 255, 255))
 
         image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
         out_name = f"{source.stem}_cuboid.png"
