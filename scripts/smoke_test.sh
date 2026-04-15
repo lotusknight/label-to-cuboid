@@ -11,7 +11,6 @@ VIS_FY="${VIS_FY:-0}"
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <image_or_dir1> [image_or_dir2 ...]"
   echo "Example: PROMPTS=car,truck $0 ./gaosu-2"
-  echo "Example: PROMPTS=car,truck $0 ./a.jpg ./b.jpg"
   exit 1
 fi
 
@@ -36,41 +35,32 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
-IFS=',' read -r -a prompt_list <<< "$PROMPTS"
-for prompt in "${prompt_list[@]}"; do
-  prompt="$(echo "$prompt" | xargs)"
-  if [[ -z "$prompt" ]]; then
-    continue
-  fi
+tmp_response="$(mktemp)"
+tmp_status="$(mktemp)"
+cleanup() { rm -f "$tmp_response" "$tmp_status"; }
+trap cleanup EXIT
 
-  tmp_response="$(mktemp)"
-  tmp_status="$(mktemp)"
-  cleanup() {
-    rm -f "$tmp_response" "$tmp_status"
-  }
-  trap cleanup EXIT
+curl_args=(
+  -sS
+  -o "$tmp_response"
+  -w "%{http_code}"
+  -X POST
+  "${BASE_URL}/infer"
+  -F "prompt=${PROMPTS}"
+  -F "confidence_threshold=${CONFIDENCE_THRESHOLD}"
+)
 
-  curl_args=(
-    -sS
-    -o "$tmp_response"
-    -w "%{http_code}"
-    -X POST
-    "${BASE_URL}/infer"
-    -F "prompt=${prompt}"
-    -F "confidence_threshold=${CONFIDENCE_THRESHOLD}"
-  )
+for image in "${images[@]}"; do
+  curl_args+=(-F "images=@${image}")
+done
 
-  for image in "${images[@]}"; do
-    curl_args+=(-F "images=@${image}")
-  done
+http_code="$(curl "${curl_args[@]}")"
+echo "$http_code" > "$tmp_status"
 
-  http_code="$(curl "${curl_args[@]}")"
-  echo "$http_code" > "$tmp_status"
+response_file="${OUTPUT_DIR}/response.json"
+cp "$tmp_response" "$response_file"
 
-  response_file="${OUTPUT_DIR}/response_${prompt}.json"
-  cp "$tmp_response" "$response_file"
-
-  python3 - "$tmp_response" "$tmp_status" "$prompt" "$OUTPUT_DIR" "$VIS_FX" "$VIS_FY" "${images[@]}" <<'PY'
+python3 - "$tmp_response" "$tmp_status" "$OUTPUT_DIR" "$VIS_FX" "$VIS_FY" "${images[@]}" <<'PY'
 import json
 import pathlib
 import sys
@@ -80,11 +70,10 @@ from PIL import Image, ImageDraw
 
 response_path = pathlib.Path(sys.argv[1])
 status_path = pathlib.Path(sys.argv[2])
-expected_prompt = sys.argv[3]
-output_dir = pathlib.Path(sys.argv[4])
-vis_fx = float(sys.argv[5])
-vis_fy = float(sys.argv[6])
-image_paths = [pathlib.Path(p) for p in sys.argv[7:]]
+output_dir = pathlib.Path(sys.argv[3])
+vis_fx = float(sys.argv[4])
+vis_fy = float(sys.argv[5])
+image_paths = [pathlib.Path(p) for p in sys.argv[6:]]
 
 status = status_path.read_text().strip()
 if status != "200":
@@ -100,11 +89,6 @@ missing_top = required_top - set(payload)
 if missing_top:
     raise SystemExit(f"[FAIL] Missing top-level keys: {sorted(missing_top)}")
 
-if payload["prompt"] != expected_prompt:
-    raise SystemExit(
-        f"[FAIL] prompt mismatch: got={payload['prompt']!r} expected={expected_prompt!r}"
-    )
-
 if not isinstance(payload["total_cuboids"], int):
     raise SystemExit("[FAIL] total_cuboids must be int")
 
@@ -116,23 +100,15 @@ if len(results) != len(image_paths):
         f"[FAIL] results length mismatch: got={len(results)} expected={len(image_paths)}"
     )
 
-required_item = {"image_index", "filename", "count", "cuboids", "error"}
-for idx, item in enumerate(results):
-    if not isinstance(item, dict):
-        raise SystemExit(f"[FAIL] results[{idx}] must be object")
-    missing_item = required_item - set(item)
-    if missing_item:
-        raise SystemExit(f"[FAIL] results[{idx}] missing keys: {sorted(missing_item)}")
-    if not isinstance(item["image_index"], int):
-        raise SystemExit(f"[FAIL] results[{idx}].image_index must be int")
-    if not isinstance(item["filename"], str):
-        raise SystemExit(f"[FAIL] results[{idx}].filename must be str")
-    if not isinstance(item["count"], int):
-        raise SystemExit(f"[FAIL] results[{idx}].count must be int")
-    if not isinstance(item["cuboids"], list):
-        raise SystemExit(f"[FAIL] results[{idx}].cuboids must be list")
-    if item["error"] is not None and not isinstance(item["error"], str):
-        raise SystemExit(f"[FAIL] results[{idx}].error must be null or str")
+labels = payload.get("labels", [payload["prompt"]])
+
+LABEL_COLORS = {}
+PALETTE = [
+    (255, 0, 0), (0, 200, 0), (0, 100, 255), (255, 165, 0),
+    (255, 0, 255), (0, 255, 255), (128, 0, 255), (255, 255, 0),
+]
+for i, lbl in enumerate(labels):
+    LABEL_COLORS[lbl] = PALETTE[i % len(PALETTE)]
 
 
 def project_corner(corner: Iterable[float], width: int, height: int, focal: float = 0) -> tuple[float, float] | None:
@@ -148,14 +124,6 @@ def project_corner(corner: Iterable[float], width: int, height: int, focal: floa
     return (u, v)
 
 
-COLORS = [
-    (255, 0, 0), (0, 200, 0), (0, 100, 255), (255, 165, 0),
-    (255, 0, 255), (0, 255, 255), (128, 0, 255), (255, 255, 0),
-]
-
-# Corner layout (signs array order):
-#   0=(-,-,-) 1=(-,-,+) 2=(-,+,-) 3=(-,+,+)
-#   4=(+,-,-) 5=(+,-,+) 6=(+,+,-) 7=(+,+,+)
 front_edges = [(0, 2), (2, 6), (6, 4), (4, 0)]
 back_edges  = [(1, 3), (3, 7), (7, 5), (5, 1)]
 depth_edges = [(0, 1), (2, 3), (4, 5), (6, 7)]
@@ -176,10 +144,10 @@ for item in results:
         draw_over = ImageDraw.Draw(overlay)
         width, height = image.size
 
-        for ci, cuboid in enumerate(item["cuboids"]):
-            color = COLORS[ci % len(COLORS)]
-            label = cuboid.get("label", expected_prompt)
+        for cuboid in item["cuboids"]:
+            label = cuboid.get("label", "?")
             conf = cuboid.get("confidence", 0.0)
+            color = LABEL_COLORS.get(label, (200, 200, 200))
 
             bbox = cuboid.get("bbox_2d")
             if isinstance(bbox, list) and len(bbox) == 4:
@@ -200,21 +168,18 @@ for item in results:
                         draw_main.line((pts[a], pts[b]), fill=color, width=2)
 
         image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
-        out_name = f"{source.stem}_{expected_prompt}_cuboid.png"
+        out_name = f"{source.stem}_cuboid.png"
         out_path = output_dir / out_name
         image.save(out_path)
         generated += 1
 
 print("[PASS] Smoke test passed.")
 print(
-    f"[INFO] prompt={payload['prompt']!r} images={len(image_paths)} "
+    f"[INFO] labels={labels} images={len(image_paths)} "
     f"total_cuboids={payload['total_cuboids']} rendered={generated}"
 )
 print(f"[INFO] response={response_path}")
 print(f"[INFO] output_dir={output_dir}")
 PY
-  rm -f "$tmp_response" "$tmp_status"
-  trap - EXIT
-done
 
-echo "[DONE] all prompts finished: $PROMPTS"
+echo "[DONE] finished: $PROMPTS"

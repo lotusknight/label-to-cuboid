@@ -14,6 +14,7 @@ class ImageResult(BaseModel):
 
 class InferenceResponse(BaseModel):
     prompt: str
+    labels: list[str] = Field(default_factory=list)
     total_cuboids: int
     results: list[ImageResult]
 

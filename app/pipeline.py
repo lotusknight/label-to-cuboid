@@ -241,6 +241,43 @@ class CuboidPipeline:
     def is_ready(self) -> bool:
         return self.sam_backend is not None and self.depth_backend is not None
 
+    @staticmethod
+    def _cross_label_nms(
+        cuboids: list[dict[str, object]], iou_threshold: float = 0.3
+    ) -> list[dict[str, object]]:
+        """Remove duplicate detections across different labels using bbox_2d IoU."""
+        if len(cuboids) <= 1:
+            return cuboids
+        cuboids = sorted(cuboids, key=lambda c: c.get("confidence", 0), reverse=True)
+        keep: list[dict[str, object]] = []
+        suppressed = [False] * len(cuboids)
+        for i in range(len(cuboids)):
+            if suppressed[i]:
+                continue
+            keep.append(cuboids[i])
+            bi = cuboids[i].get("bbox_2d")
+            if not isinstance(bi, list) or len(bi) != 4:
+                continue
+            ax0, ay0, ax1, ay1 = bi
+            area_a = max(0, ax1 - ax0) * max(0, ay1 - ay0)
+            for j in range(i + 1, len(cuboids)):
+                if suppressed[j]:
+                    continue
+                bj = cuboids[j].get("bbox_2d")
+                if not isinstance(bj, list) or len(bj) != 4:
+                    continue
+                bx0, by0, bx1, by1 = bj
+                ix0 = max(ax0, bx0)
+                iy0 = max(ay0, by0)
+                ix1 = min(ax1, bx1)
+                iy1 = min(ay1, by1)
+                inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+                area_b = max(0, bx1 - bx0) * max(0, by1 - by0)
+                union = area_a + area_b - inter
+                if union > 0 and inter / union > iou_threshold:
+                    suppressed[j] = True
+        return keep
+
     def run_batch_inference(
         self, images: list[InferenceImage], prompt: str, threshold: float | None = None
     ) -> list[dict[str, object]]:
@@ -253,80 +290,82 @@ class CuboidPipeline:
             else float(self.settings.confidence_threshold)
         )
         batch_size = int(self.settings.gpu_batch_size)
+        labels = [p.strip() for p in prompt.split(",") if p.strip()]
+        if not labels:
+            labels = [prompt]
         logger.info(
             "inference_started",
             extra={
                 "images_count": len(images),
                 "batch_size": batch_size,
-                "prompt": prompt,
+                "labels": labels,
                 "threshold": confidence_threshold,
             },
         )
 
-        all_results: list[dict[str, object]] = []
+        per_image: dict[int, dict[str, object]] = {}
         image_offset = 0
         for chunk in _chunked(images, batch_size):
             chunk_images = [entry.image.convert("RGB") for entry in chunk]
-            stage_start = time.perf_counter()
 
             assert self.sam_backend is not None
             assert self.depth_backend is not None
-            detections_by_image = self.sam_backend.segment(
-                chunk_images, prompt, confidence_threshold
-            )
+
+            depth_start = time.perf_counter()
             depth_maps, focal_lengths = self.depth_backend.estimate(chunk_images)
-            stage_elapsed = time.perf_counter() - stage_start
             logger.info(
-                "chunk_inference_complete",
-                extra={
-                    "chunk_size": len(chunk),
-                    "seconds": round(stage_elapsed, 3),
-                },
+                "depth_complete",
+                extra={"chunk_size": len(chunk), "seconds": round(time.perf_counter() - depth_start, 3)},
             )
 
-            for local_idx, (entry, detections) in enumerate(
-                zip(chunk, detections_by_image, strict=True)
-            ):
-                try:
-                    cuboids = self._detections_to_cuboids(
-                        detections=detections,
-                        depth_map=depth_maps[local_idx],
-                        focal_length_px=focal_lengths[local_idx],
-                        image_size=entry.image.size,
-                        prompt=prompt,
-                    )
-                    all_results.append(
-                        {
-                            "image_index": image_offset + local_idx,
-                            "filename": entry.filename,
-                            "cuboids": cuboids,
-                            "count": len(cuboids),
-                            "focal_length_px": focal_lengths[local_idx],
-                            "error": None,
-                        }
-                    )
-                except Exception as exc:
-                    logger.exception(
-                        "image_inference_failed",
-                        extra={
-                            "image_index": image_offset + local_idx,
-                            "image_filename": entry.filename,
-                        },
-                    )
-                    all_results.append(
-                        {
-                            "image_index": image_offset + local_idx,
-                            "filename": entry.filename,
-                            "cuboids": [],
-                            "count": 0,
-                            "focal_length_px": focal_lengths[local_idx],
-                            "error": str(exc),
-                        }
-                    )
+            merged_detections: list[list[dict[str, object]]] = [[] for _ in chunk]
+
+            for label in labels:
+                seg_start = time.perf_counter()
+                detections_by_image = self.sam_backend.segment(
+                    chunk_images, label, confidence_threshold
+                )
+                logger.info(
+                    "segment_complete",
+                    extra={"label": label, "chunk_size": len(chunk), "seconds": round(time.perf_counter() - seg_start, 3)},
+                )
+                for local_idx, (entry, detections) in enumerate(
+                    zip(chunk, detections_by_image, strict=True)
+                ):
+                    try:
+                        cuboids = self._detections_to_cuboids(
+                            detections=detections,
+                            depth_map=depth_maps[local_idx],
+                            focal_length_px=focal_lengths[local_idx],
+                            image_size=entry.image.size,
+                            prompt=label,
+                        )
+                        merged_detections[local_idx].extend(cuboids)
+                    except Exception:
+                        logger.exception(
+                            "image_inference_failed",
+                            extra={
+                                "image_index": image_offset + local_idx,
+                                "image_filename": entry.filename,
+                                "label": label,
+                            },
+                        )
+
+            for local_idx, entry in enumerate(chunk):
+                global_idx = image_offset + local_idx
+                cuboids = self._cross_label_nms(merged_detections[local_idx])
+                per_image[global_idx] = {
+                    "image_index": global_idx,
+                    "filename": entry.filename,
+                    "cuboids": cuboids,
+                    "count": len(cuboids),
+                    "focal_length_px": focal_lengths[local_idx],
+                    "error": None,
+                }
 
             image_offset += len(chunk)
 
-        return all_results
+        return [per_image[i] for i in sorted(per_image)]
 
     def _detections_to_cuboids(
         self,

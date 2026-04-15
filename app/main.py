@@ -112,5 +112,8 @@ async def infer(
             "seconds": round(elapsed, 3),
         },
     )
-    return InferenceResponse(prompt=prompt, total_cuboids=total_cuboids, results=results)
+    labels = [p.strip() for p in prompt.split(",") if p.strip()] or [prompt]
+    return InferenceResponse(
+        prompt=prompt, labels=labels, total_cuboids=total_cuboids, results=results
+    )
 
