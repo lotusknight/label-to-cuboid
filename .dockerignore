@@ -17,6 +17,7 @@ build/
 *.pth
 *.safetensors
 .cache/
+sam3-main.zip
 
 # Local outputs
 cuboids*.json

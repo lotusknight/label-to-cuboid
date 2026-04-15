@@ -119,8 +119,16 @@ python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+unzip -q sam3-main.zip -d /tmp
+pip install /tmp/sam3-main
 pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+If you do not have `sam3-main.zip` locally, you can still install it directly:
+
+```bash
+pip install "sam3 @ https://codeload.github.com/facebookresearch/sam3/zip/refs/heads/main"
 ```
 
 ## Implementation Details

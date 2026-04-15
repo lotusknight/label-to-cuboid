@@ -26,6 +26,7 @@ COPY requirements.txt /app/requirements.txt
 
 RUN pip install --upgrade pip && \
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 && \
+    pip install "sam3 @ https://codeload.github.com/facebookresearch/sam3/zip/refs/heads/main" && \
     pip install -r requirements.txt
 
 # Optional cache warmup for faster first request.

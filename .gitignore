@@ -10,6 +10,7 @@ build/
 .venv/
 venv/
 env/
+.conda/
 
 # Model weights and checkpoints
 *.pt
@@ -41,3 +42,4 @@ Thumbs.db
 # Cloned repos (installed as editable packages)
 sam3/
 ml-depth-pro/
+sam3-main.zip

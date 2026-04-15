@@ -8,10 +8,10 @@ python-json-logger
 numpy
 scipy
 Pillow
+einops
+pycocotools
 
 torch
 torchvision
 transformers>=4.48
 accelerate
-
-sam3 @ git+https://github.com/facebookresearch/sam3.git
