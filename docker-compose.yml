@@ -17,6 +17,7 @@ services:
       SAM3_CHECKPOINT_PATH: /models/sam3.pt
       DEVICE: cuda
       MODEL_DTYPE: float16
+      HEADING_MODE: "3d"   # 3d = PCA on 3D point cloud, 2d = mask major-axis back-projection
       HOST: 0.0.0.0
       PORT: 8000
     volumes:

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     depth_local_path: str = ""
     device: str = "cuda"
     model_dtype: str = "float16"
+    heading_mode: str = Field(default="3d", pattern="^(3d|2d)$")
 
 
 @lru_cache(maxsize=1)

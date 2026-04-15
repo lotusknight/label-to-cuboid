@@ -280,7 +280,8 @@ class CuboidPipeline:
         return keep
 
     def run_batch_inference(
-        self, images: list[InferenceImage], prompt: str, threshold: float | None = None
+        self, images: list[InferenceImage], prompt: str,
+        threshold: float | None = None, heading_mode: str | None = None,
     ) -> list[dict[str, object]]:
         if not self.is_ready:
             raise RuntimeError("Pipeline models are not loaded")
@@ -340,6 +341,7 @@ class CuboidPipeline:
                             focal_length_px=focal_lengths[local_idx],
                             image_size=entry.image.size,
                             prompt=label,
+                            heading_mode=heading_mode,
                         )
                         merged_detections[local_idx].extend(cuboids)
                     except Exception:
@@ -375,9 +377,11 @@ class CuboidPipeline:
         focal_length_px: float,
         image_size: tuple[int, int],
         prompt: str,
+        heading_mode: str | None = None,
     ) -> list[dict[str, object]]:
         width, height = image_size
         intrinsics = build_intrinsics(focal_length_px, width, height)
+        use_2d_heading = (heading_mode or self.settings.heading_mode) == "2d"
         cuboids: list[dict[str, object]] = []
 
         for object_index, det in enumerate(detections):
@@ -417,7 +421,9 @@ class CuboidPipeline:
             if len(points_3d) < 10:
                 continue
 
-            heading = estimate_heading_from_mask(mask_for_depth, depth_map, intrinsics)
+            heading = None
+            if use_2d_heading:
+                heading = estimate_heading_from_mask(mask_for_depth, depth_map, intrinsics)
             obb = fit_oriented_bounding_box(points_3d, heading_hint=heading)
             cuboids.append(
                 {

@@ -49,6 +49,7 @@ async def infer(
     images: list[UploadFile] = File(...),
     prompt: str = Form(...),
     confidence_threshold: float | None = Form(default=None),
+    heading_mode: str | None = Form(default=None),
 ) -> InferenceResponse:
     if not prompt.strip():
         raise HTTPException(status_code=400, detail="prompt must not be empty")
@@ -94,7 +95,7 @@ async def infer(
     try:
         decoded = await run_in_threadpool(decode_uploads, raw_uploads)
         results = await run_in_threadpool(
-            pipeline.run_batch_inference, decoded, prompt, confidence_threshold
+            pipeline.run_batch_inference, decoded, prompt, confidence_threshold, heading_mode
         )
     except HTTPException:
         raise

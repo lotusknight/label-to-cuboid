@@ -6,6 +6,7 @@ PROMPTS="${PROMPTS:-chair}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUTPUT_DIR="${OUTPUT_DIR:-./smoke_outputs/${TIMESTAMP}}"
 CONFIDENCE_THRESHOLD="${CONFIDENCE_THRESHOLD:-0.3}"
+HEADING_MODE="${HEADING_MODE:-}"
 VIS_FX="${VIS_FX:-0}"
 VIS_FY="${VIS_FY:-0}"
 
@@ -50,6 +51,10 @@ curl_args=(
   -F "prompt=${PROMPTS}"
   -F "confidence_threshold=${CONFIDENCE_THRESHOLD}"
 )
+
+if [[ -n "$HEADING_MODE" ]]; then
+  curl_args+=(-F "heading_mode=${HEADING_MODE}")
+fi
 
 for image in "${images[@]}"; do
   curl_args+=(-F "images=@${image}")
