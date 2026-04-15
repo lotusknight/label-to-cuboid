@@ -17,6 +17,7 @@ from app.config import Settings
 from app.geometric_lifting import (
     backproject_depth_to_3d,
     build_intrinsics,
+    estimate_heading_from_mask,
     filter_outliers,
     fit_oriented_bounding_box,
     rotation_matrix_to_quaternion,
@@ -416,7 +417,8 @@ class CuboidPipeline:
             if len(points_3d) < 10:
                 continue
 
-            obb = fit_oriented_bounding_box(points_3d)
+            heading = estimate_heading_from_mask(mask_for_depth, depth_map, intrinsics)
+            obb = fit_oriented_bounding_box(points_3d, heading_hint=heading)
             cuboids.append(
                 {
                     "object_index": object_index,

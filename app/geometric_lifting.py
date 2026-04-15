@@ -61,31 +61,74 @@ def filter_outliers(points_3d: np.ndarray, std_multiplier: float = 2.0) -> np.nd
     return points_3d[keep]
 
 
+def estimate_heading_from_mask(
+    mask: np.ndarray,
+    depth_map: np.ndarray,
+    intrinsics: np.ndarray,
+) -> np.ndarray | None:
+    """Estimate a vehicle's 3D heading from its 2D mask shape.
+
+    Runs 2D PCA on the mask pixels to find the major axis, picks two
+    representative points along that axis, back-projects them into 3D
+    using their actual depth values, and returns the 3D direction
+    projected onto the XZ ground plane.  Much more stable than running
+    PCA on the noisy 3D point cloud.
+    """
+    vs, us = np.where(mask)
+    if len(vs) < 5:
+        return None
+
+    uv = np.column_stack([us.astype(np.float64), vs.astype(np.float64)])
+    center_2d = uv.mean(axis=0)
+    cov2d = np.cov(uv, rowvar=False)
+    eigvals, eigvecs = np.linalg.eigh(cov2d)
+    major = eigvecs[:, eigvals.argsort()[-1]]
+
+    proj = (uv - center_2d) @ major
+    p10 = int(np.percentile(np.arange(len(proj)), 10, method="nearest"))
+    p90 = int(np.percentile(np.arange(len(proj)), 90, method="nearest"))
+    order = proj.argsort()
+    idx_lo, idx_hi = order[max(p10, 0)], order[min(p90, len(order) - 1)]
+
+    fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+    cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+
+    pts_3d = []
+    for idx in (idx_lo, idx_hi):
+        u_px, v_px = float(us[idx]), float(vs[idx])
+        z = float(depth_map[int(v_px), int(u_px)])
+        if not (np.isfinite(z) and z > 0):
+            return None
+        x3 = (u_px - cx) * z / fx
+        z3 = z
+        pts_3d.append(np.array([x3, 0.0, z3]))
+
+    direction = pts_3d[1] - pts_3d[0]
+    direction[1] = 0.0
+    norm = np.linalg.norm(direction)
+    if norm < 1e-8:
+        return None
+    return direction / norm
+
+
 def fit_oriented_bounding_box(
     points_3d: np.ndarray,
     min_dim_ratio: float = 0.3,
-    gravity_aligned: bool = True,
+    heading_hint: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
-    """Fit an oriented bounding box to a 3D point cloud.
+    """Fit a gravity-aligned oriented bounding box to a 3D point cloud.
 
-    When ``gravity_aligned`` is True the cuboid's Y axis is locked to the
-    camera-Y direction (vertical in the image) so that top/bottom edges
-    stay horizontal.  The heading (yaw) in the XZ ground plane is still
-    estimated from the point distribution via PCA.
+    Y axis is locked to camera-vertical so top/bottom edges stay
+    horizontal.  If ``heading_hint`` (a unit vector in the XZ plane)
+    is provided it is used for the forward direction; otherwise the
+    heading is estimated from 3D PCA on the XZ projection (noisier).
 
-    ``min_dim_ratio`` inflates any collapsed axis to at least that fraction
-    of the largest axis so the cuboid has realistic depth.
+    ``min_dim_ratio`` inflates any collapsed axis to at least that
+    fraction of the largest axis so the cuboid has realistic depth.
     """
     centroid = np.mean(points_3d, axis=0)
     centered = points_3d - centroid
-
-    if gravity_aligned:
-        axes = _gravity_aligned_axes(centered)
-    else:
-        cov = np.cov(centered, rowvar=False)
-        eigenvalues, eigenvectors = np.linalg.eigh(cov)
-        order = eigenvalues.argsort()[::-1]
-        axes = eigenvectors[:, order]
+    axes = _gravity_aligned_axes(centered, heading_hint=heading_hint)
 
     if np.linalg.det(axes) < 0.0:
         axes[:, -1] *= -1.0
@@ -128,30 +171,40 @@ def fit_oriented_bounding_box(
     }
 
 
-def _gravity_aligned_axes(centered: np.ndarray) -> np.ndarray:
+def _gravity_aligned_axes(
+    centered: np.ndarray,
+    heading_hint: np.ndarray | None = None,
+) -> np.ndarray:
     """Build a rotation matrix with Y locked to camera-vertical.
 
-    Camera convention: X = right, Y = down, Z = forward.
-    The cuboid's local axes are:
-      col 0 – "width"  : heading direction in the XZ ground plane (PCA)
-      col 1 – "height" : camera Y  (gravity / vertical)
-      col 2 – "depth"  : orthogonal, completes the right-hand frame
+    If ``heading_hint`` is given (a unit vector in the XZ plane) it is
+    used directly as the forward direction.  Otherwise falls back to
+    PCA on the XZ projection of the 3D points.
     """
     y_axis = np.array([0.0, 1.0, 0.0])
 
-    xz = centered[:, [0, 2]]
-    if xz.shape[0] < 2:
-        forward = np.array([0.0, 0.0, 1.0])
-    else:
-        cov2d = np.cov(xz, rowvar=False)
-        eigvals, eigvecs = np.linalg.eigh(cov2d)
-        principal = eigvecs[:, eigvals.argsort()[-1]]
-        forward = np.array([principal[0], 0.0, principal[1]])
+    if heading_hint is not None:
+        forward = heading_hint.copy()
+        forward[1] = 0.0
         norm = np.linalg.norm(forward)
-        if norm < 1e-8:
+        if norm > 1e-8:
+            forward /= norm
+        else:
+            forward = np.array([0.0, 0.0, 1.0])
+    else:
+        xz = centered[:, [0, 2]]
+        if xz.shape[0] < 2:
             forward = np.array([0.0, 0.0, 1.0])
         else:
-            forward /= norm
+            cov2d = np.cov(xz, rowvar=False)
+            eigvals, eigvecs = np.linalg.eigh(cov2d)
+            principal = eigvecs[:, eigvals.argsort()[-1]]
+            forward = np.array([principal[0], 0.0, principal[1]])
+            norm = np.linalg.norm(forward)
+            if norm < 1e-8:
+                forward = np.array([0.0, 0.0, 1.0])
+            else:
+                forward /= norm
 
     side = np.cross(y_axis, forward)
     norm = np.linalg.norm(side)

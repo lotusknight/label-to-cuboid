@@ -3,7 +3,8 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:8000}"
 PROMPTS="${PROMPTS:-chair}"
-OUTPUT_DIR="${OUTPUT_DIR:-./smoke_outputs}"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+OUTPUT_DIR="${OUTPUT_DIR:-./smoke_outputs/${TIMESTAMP}}"
 CONFIDENCE_THRESHOLD="${CONFIDENCE_THRESHOLD:-0.3}"
 VIS_FX="${VIS_FX:-0}"
 VIS_FY="${VIS_FY:-0}"
